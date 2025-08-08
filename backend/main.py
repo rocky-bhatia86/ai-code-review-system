@@ -102,7 +102,18 @@ async def github_webhook(request: Request):
         if pr_info["action"] not in ["opened", "synchronize"]:
             return {"message": f"Ignored action: {pr_info['action']}"}
         
-        # Get PR diff
+        # NEW APPROACH: Fetch individual file patches for accurate position mapping
+        print("🔄 DEBUG: Fetching PR file patches from GitHub API")
+        pr_files = github_service.fetch_pr_file_patches(
+            pr_info["repo_owner"],
+            pr_info["repo_name"],
+            pr_info["pr_number"]
+        )
+        
+        if not pr_files:
+            return {"message": "Could not fetch PR file patches"}
+        
+        # Get PR diff for AI analysis
         diff_content = github_service.get_pr_diff(
             pr_info["repo_owner"], 
             pr_info["repo_name"], 
@@ -112,26 +123,54 @@ async def github_webhook(request: Request):
         if not diff_content:
             return {"message": "Could not fetch PR diff"}
         
-        # Review the diff
-        review = review_service.review_code(diff_content, "Git diff")
+        # Review the diff with line-specific comments
+        review_result = review_service.review_pr_diff(diff_content, "Git diff")
         
-        # Post review as comment
-        comment_body = f"""## 🤖 AI Code Review
+        # NEW: Map AI comments using per-file patches
+        print("🔄 DEBUG: Mapping AI comments to GitHub positions")
+        mapped_comments = github_service.map_ai_diff_lines_to_github_positions(
+            review_result.get("line_comments", []),
+            pr_files,
+            diff_content  # Pass the full diff for line mapping
+        )
+        
+        # Prepare GitHub inline comments - they're already properly formatted
+        github_comments = []
+        if mapped_comments:
+            from models import ReviewComment
+            
+            print(f"🔄 DEBUG: Converting {len(mapped_comments)} mapped comments to ReviewComment objects")
+            
+            # Convert mapped comments to ReviewComment objects
+            for comment in mapped_comments:
+                github_comments.append(ReviewComment(
+                    body=comment["body"],
+                    path=comment["path"], 
+                    position=comment["position"]
+                ))
+                print(f"✅ DEBUG: Created ReviewComment for {comment['path']}:pos{comment['position']}")
+        
+        # Create overall review comment
+        overall_comment = f"""## 🤖 AI Code Review - Critical Issues Only
         
 **Pull Request:** {pr_info['pr_title']}
 **Author:** @{pr_info['author']}
 
-{review}
+{review_result['overall_review']}
+
+**Critical Issues Found:** {len(mapped_comments)} inline comments posted
 
 ---
-*Automated review by AI Code Review System*
+*Automated critical review by AI Code Review System*
         """
         
-        success = github_service.post_pr_comment(
+        # Post PR review with inline comments
+        success = github_service.post_pr_review(
             pr_info["repo_owner"],
             pr_info["repo_name"], 
             pr_info["pr_number"],
-            comment_body
+            overall_comment,
+            github_comments
         )
         
         if success:
@@ -206,11 +245,28 @@ def review_pr_manually(request: PRReviewRequest):
         else:
             raise HTTPException(status_code=400, detail="No content to review")
         
-        # Review the content
-        review = review_service.review_code(content_to_review, context)
+        # Review the content with critical focus
+        if url_type == "pull" and pr_number:
+            # Use diff-specific review for PRs
+            review_result = review_service.review_pr_diff(content_to_review, context)
+            
+            # Format line comments for display
+            line_comments_text = ""
+            if review_result.get("line_comments"):
+                line_comments_text = "\n\n## 🚨 Critical Issues:\n"
+                for i, comment in enumerate(review_result["line_comments"], 1):
+                    line_comments_text += f"\n**{i}. Line {comment['line']} - {comment['severity']}**\n"
+                    line_comments_text += f"- **Issue**: {comment['issue']}\n"
+                    line_comments_text += f"- **Impact**: {comment['impact']}\n"
+                    line_comments_text += f"- **Fix**: {comment['fix']}\n"
+            
+            review_text = f"{review_result['overall_review']}{line_comments_text}"
+        else:
+            # Use regular review for branch/file content
+            review_text = review_service.review_code(content_to_review, context)
         
         return ReviewResponse(
-            review=f"🔍 **Review for:** {request.pr_url}\n\n{review}"
+            review=f"🔍 **Critical Review for:** {request.pr_url}\n\n{review_text}"
         )
         
     except ValueError:
