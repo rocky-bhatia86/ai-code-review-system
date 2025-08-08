@@ -56,8 +56,8 @@ sudo apt install -y python3-pip
 ```bash
 # Clone your code
 cd /home/azureuser
-git clone https://github.com/your-username/ai_code_review_project.git
-cd ai_code_review_project
+git clone https://github.com/rocky-bhatia86/ai-code-review-system.git
+cd ai-code-review-system
 
 # Or upload your local code
 # scp -r ./ai_code_review_project azureuser@your-vm-ip:/home/azureuser/
@@ -67,7 +67,8 @@ cd ai_code_review_project
 ```bash
 # Create Python virtual environment
 cd backend
-python3.11 -m venv venv
+sudo apt install python3.8-venv
+python3 -m venv venv
 source venv/bin/activate
 
 # Install Python dependencies
