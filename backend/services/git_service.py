@@ -26,16 +26,7 @@ class GitHubService:
         }
     
     def verify_webhook_signature(self, payload_body: bytes, signature_header: str) -> bool:
-        """
-        Verify GitHub webhook signature for security
-        
-        Args:
-            payload_body: Raw webhook payload
-            signature_header: X-Hub-Signature-256 header from GitHub
-            
-        Returns:
-            True if signature is valid
-        """
+        """Verify GitHub webhook signature for security"""
         if not self.webhook_secret:
             return True  # Skip verification if no secret configured
         
@@ -48,17 +39,7 @@ class GitHubService:
         return hmac.compare_digest(expected_signature, signature_header)
     
     def get_pr_diff(self, repo_owner: str, repo_name: str, pr_number: int) -> Optional[str]:
-        """
-        Get the diff content of a pull request
-        
-        Args:
-            repo_owner: GitHub repository owner
-            repo_name: GitHub repository name  
-            pr_number: Pull request number
-            
-        Returns:
-            Diff content as string or None if error
-        """
+        """Get the diff content of a pull request"""
         if not self.token:
             return None
             
@@ -71,7 +52,6 @@ class GitHubService:
             
             response = requests.get(url, headers=headers)
             response.raise_for_status()
-            
             return response.text
             
         except requests.RequestException as e:
@@ -79,12 +59,7 @@ class GitHubService:
             return None
     
     def get_pr_files(self, repo_owner: str, repo_name: str, pr_number: int) -> List[Dict]:
-        """
-        Get list of files changed in a pull request
-        
-        Returns:
-            List of file objects with filename, status, changes, etc.
-        """
+        """Get list of files changed in a pull request"""
         if not self.token:
             return []
             
@@ -93,27 +68,38 @@ class GitHubService:
         try:
             response = requests.get(url, headers=self.headers)
             response.raise_for_status()
-            
             return response.json()
             
         except requests.RequestException as e:
             print(f"Error fetching PR files: {e}")
             return []
     
+    def post_pr_review(self, repo_owner: str, repo_name: str, pr_number: int,
+                      review_body: str, comments: List[ReviewComment] = None) -> bool:
+        """Post a review with inline comments to a pull request"""
+        if not self.token:
+            return False
+            
+        url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/reviews"
+        
+        data = {
+            "body": review_body,
+            "event": "COMMENT",
+            "comments": [comment.dict() for comment in (comments or [])]
+        }
+        
+        try:
+            response = requests.post(url, headers=self.headers, json=data)
+            response.raise_for_status()
+            return True
+            
+        except requests.RequestException as e:
+            print(f"Error posting PR review: {e}")
+            return False
+    
     def post_pr_comment(self, repo_owner: str, repo_name: str, pr_number: int, 
                        comment_body: str) -> bool:
-        """
-        Post a general comment to a pull request
-        
-        Args:
-            repo_owner: Repository owner
-            repo_name: Repository name
-            pr_number: PR number
-            comment_body: Comment text
-            
-        Returns:
-            True if successful
-        """
+        """Post a general comment to a pull request"""
         if not self.token:
             return False
             
@@ -130,48 +116,8 @@ class GitHubService:
             print(f"Error posting PR comment: {e}")
             return False
     
-    def post_pr_review(self, repo_owner: str, repo_name: str, pr_number: int,
-                      review_body: str, comments: List[ReviewComment] = None) -> bool:
-        """
-        Post a review with inline comments to a pull request
-        
-        Args:
-            repo_owner: Repository owner
-            repo_name: Repository name  
-            pr_number: PR number
-            review_body: Overall review summary
-            comments: List of inline comments
-            
-        Returns:
-            True if successful
-        """
-        if not self.token:
-            return False
-            
-        url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/pulls/{pr_number}/reviews"
-        
-        data = {
-            "body": review_body,
-            "event": "COMMENT",  # COMMENT, APPROVE, or REQUEST_CHANGES
-            "comments": [comment.dict() for comment in (comments or [])]
-        }
-        
-        try:
-            response = requests.post(url, headers=self.headers, json=data)
-            response.raise_for_status()
-            return True
-            
-        except requests.RequestException as e:
-            print(f"Error posting PR review: {e}")
-            return False
-    
     def parse_webhook_pr(self, webhook_data: Dict) -> Optional[Dict]:
-        """
-        Parse GitHub webhook data for pull request events
-        
-        Returns:
-            Dictionary with PR info or None if not a PR event
-        """
+        """Parse GitHub webhook data for pull request events"""
         if "pull_request" not in webhook_data:
             return None
             
@@ -190,6 +136,61 @@ class GitHubService:
             "branch": pr["head"]["ref"],
             "base_branch": pr["base"]["ref"]
         }
+
+    def create_inline_comments(self, ai_review_result: Dict, pr_files: List[Dict]) -> List[ReviewComment]:
+        """
+        Create inline comments from AI review results
+        Maps AI suggestions to specific file lines for GitHub PR review
+        """
+        comments = []
+        line_comments = ai_review_result.get("line_comments", [])
+        
+        # Create a mapping of filenames for quick lookup
+        file_map = {f["filename"]: f for f in pr_files}
+        
+        for comment_data in line_comments:
+            file_path = comment_data.get("file")
+            line_number = comment_data.get("line")
+            
+            if file_path in file_map and line_number:
+                # Create inline comment for specific line
+                comment = ReviewComment(
+                    body=f"**{comment_data.get('severity', 'SUGGESTION')}**: {comment_data.get('message', '')}",
+                    path=file_path,
+                    position=self._calculate_position(file_map[file_path], line_number)
+                )
+                comments.append(comment)
+        
+        return comments
+    
+    def _calculate_position(self, file_data: Dict, target_line: int) -> int:
+        """
+        Calculate GitHub diff position for a given line number
+        Simple approach: use the patch data to find the position
+        """
+        if "patch" not in file_data:
+            return 1  # Default position if no patch available
+            
+        patch_lines = file_data["patch"].split('\n')
+        position = 0
+        current_line = 0
+        
+        for line in patch_lines:
+            position += 1
+            if line.startswith('@@'):
+                # Parse hunk header to get starting line
+                import re
+                match = re.search(r'\+(\d+)', line)
+                if match:
+                    current_line = int(match.group(1))
+            elif line.startswith('+'):
+                if current_line == target_line:
+                    return position
+                current_line += 1
+            elif not line.startswith('-'):
+                current_line += 1
+        
+        return 1  # Fallback position
 
 # Global service instance  
 github_service = GitHubService() 
